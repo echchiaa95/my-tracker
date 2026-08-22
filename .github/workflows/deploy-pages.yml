@@ -68,7 +68,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
-        run: npm ci
+        run: npm install
 
       - name: Build project
         working-directory: ${{ env.PROJECT_DIR }}
