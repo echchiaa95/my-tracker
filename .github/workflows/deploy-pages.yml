@@ -1,16 +1,19 @@
-name: Deploy My Tracker (from zip) to GitHub Pages
+name: Deploy My Tracker (any zip) to GitHub Pages
 
-# طريقة الاستخدام:
-# 1) ارفع my-tracker.zip في جذر الريبو (Add file → Upload files).
-# 2) من Settings → Pages → Source: اختر "GitHub Actions" (مرة واحدة فقط).
-# 3) كل رفع جديد لـ my-tracker.zip يشغّل هذا الـworkflow تلقائيًا.
+# workflow موحد — يعمل مع أي ملف ZIP مهما كان اسمه:
+#   my-tracker.zip / my-tracker(1).zip / app.zip / أي اسم آخر.
+# - يشتغل تلقائيًا عند رفع أو تعديل أي ملف .zip في الريبو (أي مجلد).
+# - يبحث عن أحدث zip (حتى عمق 4 مستويات) ويفك ضغطه.
+# - يتحقق من سلامة الـzip قبل فك الضغط برسالة عربية واضحة.
+# - يجد مجلد المشروع تلقائيًا (سواء كان على جذر الـzip أو داخل مجلد فرعي).
+# يمكن تشغيله يدويًا: Actions → Deploy My Tracker → Run workflow.
 
 on:
   push:
     branches: [main, master]
     paths:
-      - "my-tracker.zip"
-      - "**/my-tracker.zip"
+      - "*.zip"
+      - "**/*.zip"
   workflow_dispatch:
 
 permissions:
@@ -29,15 +32,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find ZIP file
+      - name: Find ZIP file (any name)
         id: locate-zip
         run: |
-          ZIP_PATH=$(find . -maxdepth 3 -iname "*.zip" -not -path "./.git/*" | head -n1)
+          # أحدث ملف zip في الريبو (بأي اسم، حتى عمق 4 مستويات)
+          ZIP_PATH=$(find . -maxdepth 4 -iname "*.zip" -not -path "./.git/*" -printf '%T@ %p\n' \
+            | sort -rn | head -n1 | cut -d' ' -f2-)
           if [ -z "$ZIP_PATH" ]; then
-            echo "::error::No ZIP file found in repository (searched up to 3 levels)."
+            echo "::error::لم يتم العثور على أي ملف zip في الريبو. ارفع الملف المضغوط أولًا."
             exit 1
           fi
           echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "تم العثور على: $ZIP_PATH"
+
+      - name: Verify ZIP integrity
+        run: |
+          # فحص سلامة الملف قبل فك الضغط — يكشف الرفع الناقص برسالة واضحة
+          # بدل خطأ unzip الغامض "End-of-central-directory signature not found".
+          if ! unzip -t "${{ steps.locate-zip.outputs.zip_path }}" > /dev/null 2>&1; then
+            echo "::error::الملف المضغوط تالف أو ناقص (غالبًا توقف التنزيل أو الرفع قبل اكتماله). الحل: احذف الملف من الريبو، أعد تنزيله من المصدر، وتأكد من اكتمال شريط الرفع قبل الضغط على Commit."
+            exit 1
+          fi
+          echo "الملف سليم."
 
       - name: Extract project
         run: |
@@ -48,21 +64,21 @@ jobs:
       - name: Find project directory
         id: locate-app
         run: |
+          # يقبل الحالتين: ملفات المشروع على جذر الـzip، أو داخل مجلد فرعي.
           if [ -f "extracted/package.json" ]; then
             APP_DIR="extracted"
           else
-            APP_DIR=$(find extracted -maxdepth 3 -name "package.json" -not -path "*/node_modules/*" | head -n1 | xargs dirname)
+            APP_DIR=$(find extracted -maxdepth 4 -name "package.json" -not -path "*/node_modules/*" | head -n1 | xargs dirname)
           fi
           if [ -z "$APP_DIR" ]; then
-            echo "::error::package.json not found inside the zip."
+            echo "::error::لم أجد package.json داخل الـzip. تأكد أن الملف يحتوي مشروع Vite كاملًا."
             exit 1
           fi
           echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
-          echo "Project found at: $APP_DIR"
+          echo "مجلد المشروع: $APP_DIR"
 
-      # بلا cache: npm — خيار الكاش كان يسبب "unable to cache dependencies"
-      # عندما يكون lockfile داخل مجلد مستخرج. npm ci بدون كاش أبطأ قليلًا
-      # لكنه مضمون ولا يفشل بسبب مسارات.
+      # بلا cache: npm — خيار الكاش يسبب "unable to cache dependencies"
+      # عندما يكون lockfile داخل مجلد مستخرج. npm ci بدون كاش مضمون.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -76,6 +92,7 @@ jobs:
         id: base-path
         run: |
           REPO_NAME="${{ github.event.repository.name }}"
+          # صفحة مستخدم/منظمة (username.github.io) تُنشر على الجذر "/".
           if [[ "$REPO_NAME" == *.github.io ]]; then
             BASE_PATH="/"
           else
@@ -93,12 +110,14 @@ jobs:
         run: |
           BUILD_DIR="${{ steps.locate-app.outputs.app_dir }}/build"
           if [ ! -f "$BUILD_DIR/index.html" ]; then
-            echo "::error::Build failed: build/index.html missing."
+            echo "::error::فشل البناء: لا يوجد build/index.html. راجع سجل خطوة Build أعلاه."
             exit 1
           fi
 
       - name: Create SPA fallback
         run: |
+          # GitHub Pages بلا server rewrite: نسخ index.html كـ 404.html حتى
+          # يعمل React Router عند فتح مسار داخلي مباشرة أو عمل Refresh.
           BUILD_DIR="${{ steps.locate-app.outputs.app_dir }}/build"
           touch "$BUILD_DIR/.nojekyll"
           cp "$BUILD_DIR/index.html" "$BUILD_DIR/404.html"
